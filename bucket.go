@@ -32,6 +32,18 @@ const (
 // This value can be changed by setting Bucket.FillPercent.
 const DefaultFillPercent = 0.5
 
+
+
+
+
+// Bucket 类似于表的一个概念，在 boltdb 相关数据必须存在一个 Bucket 下，
+// 不同 Bucket 下的数据相互隔离，每个 Bucket 下有一个单调递增的 Sequence ，类似于自增主键；
+
+
+
+
+
+
 // Bucket represents a collection of key/value pairs inside the database.
 type Bucket struct {
 	*bucket

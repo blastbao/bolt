@@ -14,25 +14,47 @@ const minKeysPerPage = 2
 const branchPageElementSize = int(unsafe.Sizeof(branchPageElement{}))
 const leafPageElementSize = int(unsafe.Sizeof(leafPageElement{}))
 
+
+// 四种页面类型
 const (
-	branchPageFlag   = 0x01
-	leafPageFlag     = 0x02
-	metaPageFlag     = 0x04
-	freelistPageFlag = 0x10
+	branchPageFlag   = 0x01 // 分支节点，对应 B+ tree 中的内节点
+	leafPageFlag     = 0x02 // 叶子节点，对应 B+ tree 中的叶子节点
+	metaPageFlag     = 0x04 // meta 页
+	freelistPageFlag = 0x10 // freelist 页
 )
 
 const (
 	bucketLeafFlag = 0x01
 )
 
+// page id 类型
 type pgid uint64
 
+// boltdb 采用了分页(page)的方式访问文件，默认情况下一个页的大小为 4KB(4096 bytes) ，每当从文件中读取和写入都是以页作为最小的基本单位。
+
+
+
+// 一个 page 页面 = page header（没有ptr） + elements
 type page struct {
-	id       pgid
-	flags    uint16
-	count    uint16
-	overflow uint32
-	ptr      uintptr
+
+	// 1. Page Header 部分
+	id       pgid    // PageID，如 0,1,2。PageID 是用于从数据库文件的内存映射(mmap)中读取具体一页的索引值
+	flags    uint16  // 表示 Page 存储的类型，包含 branchPageFlag、leafPageFlag 等四种
+	count    uint16  // 表示 Page 存储的数据元素个数，包括 branchPage 和 leafPage 类型的页面中有用。对应的元素分别是 branchPageElement 和 leafPageElement 。
+	overflow uint32  // 表示当前 Page 是否有后续 Page；如果有，表示后续页的数量，如果没有，则为0。
+
+
+	// 2. Page Data 部分
+	ptr      uintptr // ptr 用于标记页头 Page Header 部分结尾处，或者页面内存储数据 Page Data 部分的起始处。
+
+
+	// page.ptr 保存页数据区域的起始地址，不同类型 page 保存的数据格式也不同，
+	// 共有 4 种 page, 通过 flags 区分:
+	//
+	//	1. meta page: 		存放 db 的 meta data。
+	//	2. freelist page: 	存放 db 的空闲 page。
+	//	3. branch page: 	存放 branch node 的数据。
+	//	4. leaf page: 		存放 leaf node 的数据
 }
 
 // typ returns a human readable page type string used for debugging.
@@ -49,10 +71,19 @@ func (p *page) typ() string {
 	return fmt.Sprintf("unknown<%02x>", p.flags)
 }
 
+
 // meta returns a pointer to the metadata section of the page.
 func (p *page) meta() *meta {
 	return (*meta)(unsafe.Pointer(&p.ptr))
 }
+
+
+
+
+// 一个 branchPage 或 leafPage 由页头和若干 branchPageElements 或 leafPageElements 组成。
+
+
+
 
 // leafPageElement retrieves the leaf node by index
 func (p *page) leafPageElement(index uint16) *leafPageElement {
@@ -93,10 +124,15 @@ func (s pages) Len() int           { return len(s) }
 func (s pages) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s pages) Less(i, j int) bool { return s[i].id < s[j].id }
 
+
+
 // branchPageElement represents a node on a branch page.
 type branchPageElement struct {
+	// element 对应的 K/V对 的存储位置相对于当前 element 的偏移
 	pos   uint32
+	// element 对应的 Key 的长度，以字节为单位
 	ksize uint32
+	// element 指向的子节点所在 page 的页号
 	pgid  pgid
 }
 
@@ -108,7 +144,9 @@ func (n *branchPageElement) key() []byte {
 
 // leafPageElement represents a node on a leaf page.
 type leafPageElement struct {
+	// 标明当前 element 是否代表一个 Bucket ，如果是 Bucket 则其值为 1 ，如果不是则其值为 0 。
 	flags uint32
+
 	pos   uint32
 	ksize uint32
 	vsize uint32

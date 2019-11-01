@@ -189,12 +189,15 @@ func (n *node) read(p *page) {
 
 // write writes the items onto one or more pages.
 func (n *node) write(p *page) {
+
+
 	// Initialize page.
 	if n.isLeaf {
 		p.flags |= leafPageFlag
 	} else {
 		p.flags |= branchPageFlag
 	}
+
 
 	if len(n.inodes) >= 0xFFFF {
 		panic(fmt.Sprintf("inode overflow: %d (pgid=%d)", len(n.inodes), p.id))

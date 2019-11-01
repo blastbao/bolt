@@ -10,19 +10,29 @@ import (
 	"unsafe"
 )
 
+
 // flock acquires an advisory lock on a file descriptor.
+
 func flock(db *DB, mode os.FileMode, exclusive bool, timeout time.Duration) error {
 	var t time.Time
 	for {
+
 		// If we're beyond our timeout then return an error.
 		// This can only occur after we've attempted a flock once.
+
+		// 重试的超时检查
 		if t.IsZero() {
+			// 初始化为当前时间
 			t = time.Now()
 		} else if timeout > 0 && time.Since(t) > timeout {
+			// 超时报错
 			return ErrTimeout
 		}
+
+		// 获取共享锁
 		flag := syscall.LOCK_SH
 		if exclusive {
+			// 获取排它锁
 			flag = syscall.LOCK_EX
 		}
 
@@ -34,6 +44,8 @@ func flock(db *DB, mode os.FileMode, exclusive bool, timeout time.Duration) erro
 			return err
 		}
 
+
+		// 等待一段时间重试
 		// Wait for a bit and try again.
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -47,12 +59,14 @@ func funlock(db *DB) error {
 // mmap memory maps a DB's data file.
 func mmap(db *DB, sz int) error {
 	// Map the data file to memory.
+	// 内存映射
 	b, err := syscall.Mmap(int(db.file.Fd()), 0, sz, syscall.PROT_READ, syscall.MAP_SHARED|db.MmapFlags)
 	if err != nil {
 		return err
 	}
 
 	// Advise the kernel that the mmap is accessed randomly.
+	// 建议内核随机访问 mmap
 	if err := madvise(b, syscall.MADV_RANDOM); err != nil {
 		return fmt.Errorf("madvise: %s", err)
 	}
