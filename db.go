@@ -201,14 +201,14 @@ func (db *DB) String() string {
 //	1. 创建 DB 对象，并将其状态设为 opened ；
 //	2. 打开或创建文件对象
 //	3. 根据 Open 参数 ReadOnly 决定是否以进程独占的方式打开文件:
-//		如果以只读方式访问数据库文件，则不同进程可以共享读该文件；
-//		如果以读写方式访问数据库文件，则文件锁将被独占，其他进程无法同时以读写方式访问该数据库文件，这是为了防止多个进程同时修改文件；
+//		3.1 如果以只读方式访问数据库文件，则不同进程可以共享读该文件；
+//		3.2 如果以读写方式访问数据库文件，则文件锁将被独占，其他进程无法同时以读写方式访问该数据库文件，这是为了防止多个进程同时修改文件；
 //	4. 初始化写文件函数；
 //	5. 读数据库文件：
-//		如果文件大小为零，则对db进行初始化；
-//		如果大小不为零，则试图读取前 4K 个字节来确定当前数据库的 pageSize ，若失败则使用系统的pagesize作为db.pageSize。
+//		5.1 如果文件大小为零，则对 db 进行初始化；
+//		5.2 如果文件大小非零，则读取前 4K 个字节来确定当前数据库的 pageSize ，若失败则使用系统的 pagesize 作为 db.pageSize 。
 //	6. 通过 mmap 对打开的数据库文件进行内存映射，并初始化 db 对象中的 meta 指针；
-//	7. 读数据库文件中的 freelist 页，并初始化 db 对象中的 freelis t列表。freelist 列表中记录着数据库文件中的空闲页。
+//	7. 读数据库文件中的 freelist 页，并初始化 db 对象中的 freelist 列表。freelist 列表中记录着数据库文件中的空闲页。
 
 func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 
@@ -224,9 +224,9 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	db.MmapFlags = options.MmapFlags
 
 	// Set default values for later DB operations.
-	db.MaxBatchSize = DefaultMaxBatchSize
+	db.MaxBatchSize  = DefaultMaxBatchSize
 	db.MaxBatchDelay = DefaultMaxBatchDelay
-	db.AllocSize = DefaultAllocSize
+	db.AllocSize 	 = DefaultAllocSize
 
 	flag := os.O_RDWR
 	if options.ReadOnly {
@@ -556,9 +556,8 @@ func (db *DB) mmapSize(size int) (int, error) {
 
 // 在init()中:
 //
-//	1. 先分配了4个 page 大小的 buffer ；
-//	2. 将第 0 页和第 1 页初始化为 meta 页，并指定 root bucket 的 page id 为 3 ，存 freelist 记录的 page id 为 2 ，
-//		当前数据库总页数为 4 ，同时 txid 分别为 0 和 1 。
+//	1. 先分配 4 个 page 大小的 buffer ；
+//	2. 将第 0 页和第 1 页初始化为 meta 页，并指定 root bucket 的 page id 为 3 ，存 freelist 记录的 page id 为 2 ，当前数据库总页数为 4 ，同时 txid 分别为 0 和 1 。
 //	3. 将第 2 页初始化为 freelist 页，即 freelist 的记录将会存在第 2 页；
 //	4. 将第 3 页初始化为一个空页，它可以用来写入 K/V 记录，请注意它必须是 B+ Tree 中的叶子节点；
 //	5. 最后，调用写文件函数将 buffer 中的数据写入文件，同时通过 fdatasync() 调用将内核中磁盘页缓冲立即写入磁盘。
@@ -596,12 +595,6 @@ func (db *DB) init() error {
 		m.txid = txid(i)						//
 		m.checksum = m.sum64()              	// 页校验和
 	}
-
-
-
-
-
-
 
 	// 3. 将第 2 页初始化为 freelist 页，即 freelist 的记录将会存储在第 2 页
 	// Write an empty freelist at page 3.
@@ -726,24 +719,16 @@ func (db *DB) Begin(writable bool) (*Tx, error) {
 
 
 
-
-// 在 bolt 中，创建一个只读事务，其实并不会增加其 txn id ，所以，一个只读事务相当于是指向了当前最近一次完成的读写事务的状态，
-// 或者说，指向了 db 在这个只读事务打开的那个时间点的一个 snapshot 。
-
-
-
-
-
 func (db *DB) beginTx() (*Tx, error) {
 
-	// 1. 获取 db.metalock，因为后面要对 db 对象进行读写;
+	// 1. 获取 db.metalock 互斥锁，因为 t.init() 中要拷贝 db.meta 对象，在 t.init() 完成后便可以释放互斥锁
 
 	// Lock the meta pages while we initialize the transaction.
 	// We obtain the meta lock before the mmap lock because that's the order
 	// that the write transaction will obtain them.
 	db.metalock.Lock()
 
-	// 2. 获取 db.mmaplock 读锁
+	// 2. 获取 db.mmaplock 读锁，因为事务中会读 db.data[] 中的数据，整个事务过程中都要持有该锁
 
 	// Obtain a read-only lock on the mmap.
 	// When the mmap is remapped it will obtain a write lock so all transactions must finish before it can be remapped.
@@ -757,21 +742,18 @@ func (db *DB) beginTx() (*Tx, error) {
 		return nil, ErrDatabaseNotOpen
 	}
 
-	// Create a transaction associated with the database.
+	// 3. 创建事务对象并初始化
 	t := &Tx{}
 	t.init(db)
 
-	// Keep track of transaction until it closes.
-	// 创建只读事务时，会将事务 t 追加到 db.txs 中。
-	db.txs = append(db.txs, t)
-
-
+	// 4. 将只读事务 t 追加到 db.txs 中。
+	db.txs = append(db.txs, t) 	// Keep track of transaction until it closes.
 	n := len(db.txs)
 
-	// Unlock the meta pages.
+	// 5. 已经完成 t.init() 对 db.meta 的拷贝，所以可以释放 db.metalock 互斥锁
 	db.metalock.Unlock()
 
-	// Update the transaction stats.
+	// 6. 更新统计信息
 	db.statlock.Lock()
 	db.stats.TxN++
 	db.stats.OpenTxN = n
@@ -911,7 +893,6 @@ func (db *DB) Update(fn func(*Tx) error) error {
 		}
 	}()
 
-
 	// Mark as a managed tx so that the inner function cannot manually commit.
 	t.managed = true
 
@@ -920,11 +901,13 @@ func (db *DB) Update(fn func(*Tx) error) error {
 
 	t.managed = false
 
+	// 出错则回滚
 	if err != nil {
 		_ = t.Rollback()
 		return err
 	}
 
+	// 提交
 	return t.Commit()
 }
 

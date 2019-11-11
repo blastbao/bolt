@@ -57,7 +57,7 @@ type Tx struct {
 // init initializes the transaction.
 func (tx *Tx) init(db *DB) {
 
-	// 1. 初始化
+	// 1. 基本初始化
 	tx.db = db		// 将 tx.db 初始化为传入的 db
 	tx.pages = nil	// 将脏页字典 tx.pages 初始化为空
 
@@ -69,20 +69,16 @@ func (tx *Tx) init(db *DB) {
 	tx.meta = &meta{}		 // 创建一个空的 meta 对象，用它初始化 tx.meta，用于存储 db.meta()
 	db.meta().copy(tx.meta)  // 将 db.meta() 返回的数据库 meta 信息复制到刚创建的 tx.meta 对象中，这里是对象拷贝而不是指针拷贝
 
-
 	// 3. 创建根 Bucket
 	tx.root = newBucket(tx)			// 用 newBucket(tx *Tx) 创建一个 Bucket ，并将其设为根 Bucket
 	tx.root.bucket = &bucket{}		// 创建匿名嵌套于 Bucket 中的 bucket ，用于备份存储 tx.meta.root
 	*tx.root.bucket = tx.meta.root	// 存储 tx.meta.root 的目的是为找到 root bucket 所在页，进而从页中读出 root bucket
 
-
-
-	// Increment the transaction id and add a page cache for writable transactions.
-	//
-	// 如果是可写的 transaction ，就将 meta 中的 txid 加 1 ；当可写 transaction commit 后，meta 就会更新到数据库文件中，
-	// 数据库的修改版本号就增加了。可见读事务不增加 txid ，仅读写事务增加。
+	// 4. 写事务的额外初始化操作
+	// 如果是可写事务，会将 tx.metatxid 加 1 ，在 commit 后，tx.meta 就会更新到 db.meta 中，数据库的提交版本号便增加了。
+	// 如果是可写事务，不会增加 tx.metatxid ，因此只读事务相当于指向了最近一次可写事务的提交（或者说指向写事务提交时刻的快照）。
 	if tx.writable {
-		tx.pages = make(map[pgid]*page) // 初始化存储脏页的 map
+		tx.pages = make(map[pgid]*page) // 初始化用于存储脏页的 map
 		tx.meta.txid += txid(1)			// 事务ID txid++
 	}
 
@@ -486,18 +482,16 @@ func (tx *Tx) checkBucket(b *Bucket, reachable map[pgid]*page, freed map[pgid]bo
 // allocate returns a contiguous block of memory starting at a given page.
 func (tx *Tx) allocate(count int) (*page, error) {
 
-	// 分配连续的 count 个内存页，返回首页指针 p
+	// 1. 分配连续的 count 个内存页，返回页指针 p
 	p, err := tx.db.allocate(count)
 	if err != nil {
 		return nil, err
 	}
 
-	// Save to our page cache.
-	// 保存到内存缓冲中
+	// 2. 将新分配的页 p 添加到 tx 的脏页集合中，在提交时会统一处理
 	tx.pages[p.id] = p
 
-	// Update statistics.
-	// 更新统计信息
+	// 3. 更新统计信息
 	tx.stats.PageCount++
 	tx.stats.PageAlloc += count * tx.db.pageSize
 
@@ -505,6 +499,15 @@ func (tx *Tx) allocate(count int) (*page, error) {
 }
 
 // write writes any dirty pages to disk.
+
+// tx.write()的主要步骤是:
+//
+//	1. 将当前 tx 中的脏页的引用保存到本地 slice 变量中，并释放原来的引用。
+//	   请注意，Tx 对象并不是线程安全的，而接下来的写文件操作会比较耗时，此时应该避免 tx.pages 被修改;
+//	2. 对 pages 按其 pgid 排序，保证在随后按页顺序写文件，一定程度上提高写文件效率;
+//	3. 将各页循环写入文件
+//	4. 通过 fdatasync 将磁盘缓冲写入磁盘。
+
 func (tx *Tx) write() error {
 
 	// 1. 拷贝脏页字典 tx.pages 到 pages 中，以便进行排序
@@ -683,7 +686,7 @@ func (tx *Tx) Page(id int) (*PageInfo, error) {
 		return nil, nil
 	}
 
-	// 1. 从 db 中取 id 页
+	// 1. 从 db 中取第 id 页
 	p := tx.db.page(pgid(id))
 
 	// 2. 构造 PageInfo 结构体，填充字段

@@ -43,8 +43,10 @@ const DefaultFillPercent = 0.5
 type Bucket struct {
 
 	*bucket						// 匿名嵌套的 bucket 中的 root 是指 Bucket 根节点的页号，sequence 是一个序列号，可以用于 Bucket 的序号生成器。
+
 	tx       *Tx                // 当前 Bucket 所属的 Transaction 。
 	buckets  map[string]*Bucket // subbucket cache
+
 	page     *page              // inline page reference
 	rootNode *node              // Bucket 的根节点，也是对应 B+Tree 的根节点
 	nodes    map[pgid]*node     // Bucket 中的 node 集合
@@ -187,7 +189,7 @@ func (b *Bucket) openBucket(value []byte) *Bucket {
 // The bucket instance is only valid for the lifetime of the transaction.
 
 
-//在CreateBucket()中:
+//在 CreateBucket() 中:
 //
 //代码(1)处为当前Bucket创建游标;
 //代码(2)处在当前Bucket中查找key并移动游标，确定其应该插入的位置;
