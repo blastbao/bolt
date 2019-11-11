@@ -34,6 +34,18 @@ type pgid uint64
 
 
 
+
+
+//───────────────────────────────┬──────┬──────┬──────────────┬──────────────────────────────
+//                               │      │      │              │
+//──────────8 bytes──────────────┼──2───├─ 2───├─────4────────┼─────────────8────────────────
+//                               │      │      │              │
+//┌──────────────────────────────┬──────┬──────┬──────────────┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+//│                              │      │      │              │                              │
+//│           page id            │ flag │count │   overflow   │             ptr
+//│                              │      │      │              │                              │
+//└──────────────────────────────┴──────┴──────┴──────────────┼───────────────────────────────
+//
 // 一个 page 页面 = page header（没有ptr） + elements
 type page struct {
 
@@ -48,8 +60,7 @@ type page struct {
 	ptr      uintptr // ptr 用于标记页头 Page Header 部分结尾处，或者页面内存储数据 Page Data 部分的起始处。
 
 
-	// page.ptr 保存页数据区域的起始地址，不同类型 page 保存的数据格式也不同，
-	// 共有 4 种 page, 通过 flags 区分:
+	// page.ptr 保存页数据区域的起始地址，不同类型 page 保存的数据格式也不同，共有 4 种 page, 通过 flags 区分:
 	//
 	//	1. meta page: 		存放 db 的 meta data。
 	//	2. freelist page: 	存放 db 的空闲 page。
@@ -76,14 +87,6 @@ func (p *page) typ() string {
 func (p *page) meta() *meta {
 	return (*meta)(unsafe.Pointer(&p.ptr))
 }
-
-
-
-
-// 一个 branchPage 或 leafPage 由页头和若干 branchPageElements 或 leafPageElements 组成。
-
-
-
 
 // leafPageElement retrieves the leaf node by index
 func (p *page) leafPageElement(index uint16) *leafPageElement {
@@ -128,7 +131,7 @@ func (s pages) Less(i, j int) bool { return s[i].id < s[j].id }
 
 // branchPageElement represents a node on a branch page.
 type branchPageElement struct {
-	// element 对应的 K/V对 的存储位置相对于当前 element 的偏移
+	// element 对应的 K/V 对的存储位置相对于当前 element 的偏移
 	pos   uint32
 	// element 对应的 Key 的长度，以字节为单位
 	ksize uint32

@@ -6,11 +6,19 @@ import (
 	"unsafe"
 )
 
+
+
+
 // freelist represents a list of all pages that are available for allocation.
 // It also tracks pages that have been freed but are still in use by open transactions.
 type freelist struct {
+	// ids 指可用的页面的 Id
 	ids     []pgid          // all free and available free page ids.
+
+	// pending 指将要空闲的页面，由于数据库中的各种事务，一些操作后部分页面就可以被释放
 	pending map[txid][]pgid // mapping of soon-to-be free page ids by tx.
+
+	// cache 就是做了一个缓存，看一个页面是否可用
 	cache   map[pgid]bool   // fast lookup of all free and pending page ids.
 }
 

@@ -35,29 +35,31 @@ const DefaultFillPercent = 0.5
 
 
 
-
-// Bucket 类似于表的一个概念，在 boltdb 相关数据必须存在一个 Bucket 下，
-// 不同 Bucket 下的数据相互隔离，每个 Bucket 下有一个单调递增的 Sequence ，类似于自增主键；
-
-
-
-
+// Bucket 类似于表的一个概念，业务相关数据必须存在一个 Bucket 下，不同 Bucket 下的数据相互隔离，
+// 每个 Bucket 下有一个单调递增的 Sequence ，类似于自增主键；
 
 
 // Bucket represents a collection of key/value pairs inside the database.
 type Bucket struct {
-	*bucket
-	tx       *Tx                // the associated transaction
+
+	*bucket						// 匿名嵌套的 bucket 中的 root 是指 Bucket 根节点的页号，sequence 是一个序列号，可以用于 Bucket 的序号生成器。
+	tx       *Tx                // 当前 Bucket 所属的 Transaction 。
 	buckets  map[string]*Bucket // subbucket cache
 	page     *page              // inline page reference
-	rootNode *node              // materialized node for the root page.
-	nodes    map[pgid]*node     // node cache
+	rootNode *node              // Bucket 的根节点，也是对应 B+Tree 的根节点
+	nodes    map[pgid]*node     // Bucket 中的 node 集合
 
 	// Sets the threshold for filling nodes when they split. By default,
 	// the bucket will fill to 50% but it can be useful to increase this
 	// amount if you know that your write workloads are mostly append-only.
 	//
 	// This is non-persisted across transactions so it must be set in every Tx.
+
+	// FillPercent 表示 Bucket 中节点的填充百分比(或者占空比)。
+	// 该值与 B+Tree 中节点的分裂有关系，当节点中 Key 的个数或者 size 超过整个 node 容量的某个百分比后，
+	// 节点必须分裂为两个节点，这是为了防止 B+Tree 中插入 K/V 时引发频繁的再平衡操作，
+	// 所以注释中提到只有当确定大数多写入操作是向尾添加时，这个值调大才有帮助。
+	// 该值的默认值是 50% 。
 	FillPercent float64
 }
 
@@ -66,17 +68,25 @@ type Bucket struct {
 // then its root page can be stored inline in the "value", after the bucket
 // header. In the case of inline buckets, the "root" will be 0.
 type bucket struct {
+	// root 是指 Bucket 根节点的页号
 	root     pgid   // page id of the bucket's root-level page
+	// sequence 是一个序列号，可以用于 Bucket 的序号生成器
 	sequence uint64 // monotonically incrementing, used by NextSequence()
 }
 
 // newBucket returns a new bucket associated with a transaction.
 func newBucket(tx *Tx) Bucket {
-	var b = Bucket{tx: tx, FillPercent: DefaultFillPercent}
+
+	var b = Bucket{
+		tx: tx,
+		FillPercent: DefaultFillPercent,
+	}
+
 	if tx.writable {
 		b.buckets = make(map[string]*Bucket)
 		b.nodes = make(map[pgid]*node)
 	}
+
 	return b
 }
 
@@ -113,6 +123,7 @@ func (b *Bucket) Cursor() *Cursor {
 // Returns nil if the bucket does not exist.
 // The bucket instance is only valid for the lifetime of the transaction.
 func (b *Bucket) Bucket(name []byte) *Bucket {
+
 	if b.buckets != nil {
 		if child := b.buckets[string(name)]; child != nil {
 			return child
@@ -123,22 +134,26 @@ func (b *Bucket) Bucket(name []byte) *Bucket {
 	c := b.Cursor()
 	k, v, flags := c.seek(name)
 
+
 	// Return nil if the key doesn't exist or it is not a bucket.
 	if !bytes.Equal(name, k) || (flags&bucketLeafFlag) == 0 {
 		return nil
 	}
 
+
 	// Otherwise create a bucket and cache it.
 	var child = b.openBucket(v)
+
+
 	if b.buckets != nil {
 		b.buckets[string(name)] = child
 	}
 
+
 	return child
 }
 
-// Helper method that re-interprets a sub-bucket value
-// from a parent into a Bucket
+// Helper method that re-interprets a sub-bucket value from a parent into a Bucket
 func (b *Bucket) openBucket(value []byte) *Bucket {
 	var child = newBucket(b.tx)
 
@@ -170,7 +185,21 @@ func (b *Bucket) openBucket(value []byte) *Bucket {
 // CreateBucket creates a new bucket at the given key and returns the new bucket.
 // Returns an error if the key already exists, if the bucket name is blank, or if the bucket name is too long.
 // The bucket instance is only valid for the lifetime of the transaction.
+
+
+//在CreateBucket()中:
+//
+//代码(1)处为当前Bucket创建游标;
+//代码(2)处在当前Bucket中查找key并移动游标，确定其应该插入的位置;
+//代码(3)处创建一个空的内置Bucket;
+//代码(4)处将刚创建的Bucket序列化成byte slice，以作为与key对应的value插入B+Tree；
+//代码(5)处对key进行深度拷贝以防它引用的byte slice被回收;
+//代码(6)处将代表子 Bucket 的 K/V 插入到游标位置，其中 Key 是子 Bucket 的名字，Value 是子 Bucket 的序列化结果;
+//代码(7)处将当前 Bucket 的 page 字段置空，因为当前 Bucket 包含了刚创建的子 Bucket ，它不会是内置 Bucket ;
+//代码(8)处通过 b.Bucket() 方法按子 Bucket 的名字查找子 Bucket 并返回结果。请注意，这里并没有将刚创建的子 Bucket 直接返回而是通过查找的方式返回，大家可以想一想为什么？
 func (b *Bucket) CreateBucket(key []byte) (*Bucket, error) {
+
+	// 参数检查
 	if b.tx.db == nil {
 		return nil, ErrTxClosed
 	} else if !b.tx.writable {
@@ -180,8 +209,8 @@ func (b *Bucket) CreateBucket(key []byte) (*Bucket, error) {
 	}
 
 	// Move cursor to correct position.
-	c := b.Cursor()
-	k, _, flags := c.seek(key)
+	c := b.Cursor()											//(1)
+	k, _, flags := c.seek(key) 								//(2)
 
 	// Return an error if there is an existing key.
 	if bytes.Equal(key, k) {
@@ -192,23 +221,24 @@ func (b *Bucket) CreateBucket(key []byte) (*Bucket, error) {
 	}
 
 	// Create empty, inline bucket.
-	var bucket = Bucket{
+	var bucket = Bucket{ 									//(3)
 		bucket:      &bucket{},
 		rootNode:    &node{isLeaf: true},
 		FillPercent: DefaultFillPercent,
 	}
-	var value = bucket.write()
+	var value = bucket.write()								//(4)
 
 	// Insert into node.
-	key = cloneBytes(key)
-	c.node().put(key, key, value, 0, bucketLeafFlag)
+	key = cloneBytes(key)									//(5)
+	c.node().put(key, key, value, 0, bucketLeafFlag)	//(6)
 
 	// Since subbuckets are not allowed on inline buckets, we need to
 	// dereference the inline page, if it exists. This will cause the bucket
 	// to be treated as a regular, non-inline bucket for the rest of the tx.
-	b.page = nil
+	b.page = nil											//(7)
 
-	return b.Bucket(key), nil
+
+	return b.Bucket(key), nil								//(8)
 }
 
 // CreateBucketIfNotExists creates a new bucket if it doesn't already exist and returns a reference to it.
@@ -276,6 +306,8 @@ func (b *Bucket) DeleteBucket(key []byte) error {
 // Returns a nil value if the key does not exist or if the key is a nested bucket.
 // The returned value is only valid for the life of the transaction.
 func (b *Bucket) Get(key []byte) []byte {
+
+
 	k, v, flags := b.Cursor().seek(key)
 
 	// Return nil if this is a bucket.
@@ -287,6 +319,7 @@ func (b *Bucket) Get(key []byte) []byte {
 	if !bytes.Equal(key, k) {
 		return nil
 	}
+
 	return v
 }
 
@@ -295,6 +328,7 @@ func (b *Bucket) Get(key []byte) []byte {
 // Supplied value must remain valid for the life of the transaction.
 // Returns an error if the bucket was created from a read-only transaction, if the key is blank, if the key is too large, or if the value is too large.
 func (b *Bucket) Put(key []byte, value []byte) error {
+
 	if b.tx.db == nil {
 		return ErrTxClosed
 	} else if !b.Writable() {

@@ -8,16 +8,21 @@ import (
 )
 
 // node represents an in-memory, deserialized page.
+
+//	spilled: 指示当前 node 是否已经溢出(spill)，node 溢出是指当 node 的 size 超过页大小，
+//	即一页无法存 node 中所有 K/V 对时，节点会分裂成多个 node，以保证每个 node 的 size 小于页大小，
+//	分裂后产生新的 node 会增加父 node 的 size，故父 node也可能需要分裂；已经溢出过的node不需要再分裂；
+
 type node struct {
-	bucket     *Bucket
-	isLeaf     bool
-	unbalanced bool
-	spilled    bool
-	key        []byte
-	pgid       pgid
-	parent     *node
-	children   nodes
-	inodes     inodes
+	bucket     *Bucket 	// 指向 node 所属的 Bucket ;
+	isLeaf     bool		// 指示当前 node 是否是一个叶子节点，与 page 中的 flags 对应; isLeaf 决定了 inode 中记录的是什么内容。
+	unbalanced bool		// 指示当前 node 是否需要再平衡；当该 node 上有删除操作时，会标记为true，当 Tx 执行 Commit 时，会执行rebalance，将 inode 重新排列。
+	spilled    bool		// 指示当前 node 是否已经溢出;
+	key        []byte 	// node 的 key 或名字，它是 node 中第 1 个 K/V 对的 key ;
+	pgid       pgid 	// 与 node 对应的页框的页号;
+	parent     *node	// 当前节点的父节点的指针，根节点的 parent 为空;
+	children   nodes	// 当前节点的孩子节点;
+	inodes     inodes 	// 一个 inode 的 slice ，记录当前 node 中的 K/V ;
 }
 
 // root returns the top-level node this node is attached to.
@@ -158,29 +163,42 @@ func (n *node) del(key []byte) {
 }
 
 // read initializes the node from a page.
-func (n *node) read(p *page) {
-	n.pgid = p.id
-	n.isLeaf = ((p.flags & leafPageFlag) != 0)
-	n.inodes = make(inodes, int(p.count))
 
-	for i := 0; i < int(p.count); i++ {
+//node的实例化过程为:
+//
+//(1) node 的 pgid 设为 page 的 pgid ;
+//(2) node 的 isLeaf 字段由 page 的 flags 决定，如果 page 是一个 leaf page ，则 node 的 isLeaf 为 true ;
+//(3) 创建 inodes ，其容量由 page 中元素个数决定;
+//(4) 接着，向 inodes 中填充 inode 。
+// 	(4.1) 对于 leaf page ，  inode 的 flags 即为 page 中元素的 flags ，key 和 value 分别为 page 中元素对应的Key和Value；
+// 	(4.2) 对于 branch page ，inode 的 pgid  即为 page 中元素的 pgid  ，即子节点的页号，key 为 page 元素对应的 Key 。
+// 	node 中的 inode 与 page 中的 leafPageElement 或 branchPageElement 一一对应，
+// 	可以参考前文中的页磁盘布局图来理解 inode 与 elemements 的对应关系;
+//(5) 最后，将 node 的 key 设为其中第一个 inode 的 key ;
+
+func (n *node) read(p *page) {
+	n.pgid = p.id									//(1)
+	n.isLeaf = ((p.flags & leafPageFlag) != 0)		//(2)
+	n.inodes = make(inodes, int(p.count))			//(3)
+
+	for i := 0; i < int(p.count); i++ {				//(4)
 		inode := &n.inodes[i]
-		if n.isLeaf {
+		if n.isLeaf {								//(4.1)
 			elem := p.leafPageElement(uint16(i))
 			inode.flags = elem.flags
-			inode.key = elem.key()
+			inode.key   = elem.key()
 			inode.value = elem.value()
-		} else {
+		} else {									//(4.2)
 			elem := p.branchPageElement(uint16(i))
 			inode.pgid = elem.pgid
-			inode.key = elem.key()
+			inode.key  = elem.key()
 		}
 		_assert(len(inode.key) > 0, "read: zero-length inode key")
 	}
 
 	// Save first key so we can find the node in the parent when we spill.
 	if len(n.inodes) > 0 {
-		n.key = n.inodes[0].key
+		n.key = n.inodes[0].key						//(5)
 		_assert(len(n.key) > 0, "read: zero-length node key")
 	} else {
 		n.key = nil
@@ -594,14 +612,29 @@ func (s nodes) Len() int           { return len(s) }
 func (s nodes) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s nodes) Less(i, j int) bool { return bytes.Compare(s[i].inodes[0].key, s[j].inodes[0].key) == -1 }
 
+
 // inode represents an internal node inside of a node.
-// It can be used to point to elements in a page or point
-// to an element which hasn't been added to a page yet.
+// It can be used to point to elements in a page or point to an element which hasn't been added to a page yet.
+
 type inode struct {
-	flags uint32
-	pgid  pgid
-	key   []byte
-	value []byte
+	flags uint32	// 指明该 K/V 对是否代表一个 Bucket，如果是 Bucket ，则其值为 1 ，否则为 0 ;
+	pgid  pgid		// 根节点或内节点的子节点的 pgid ，可以理解为 Pointer ，请注意，叶子节点中该值无意义;
+	key   []byte	// key
+	value []byte	// value
 }
+
+
+
+//
+//type inode struct {
+//	flags uint32   // 当所在node为叶子节点时，记录key的flag
+//	pgid  pgid     // 当所在node为叶子节点时，不使用，当所在node为分支节点时，记录所指向的page-id
+//	key   []byte   // 当所在node为叶子节点时，记录的为拥有的key；当所在node为分支节点时，记录的是子
+//	// 节点的上key的下边界。例如，当当前node为分支节点，拥有3个分支，[1,2,3][5,6,7][10,11,12]
+//	// 这该node上可能有3个inode，记录的key为[1,5,10]。当进行查找时2时，2<5,则去第0个子分支上继
+//	// 续搜索，当进行查找4时，1<4<5,则去第1个分支上去继续查找。
+//	value []byte   // 当所在node为叶子节点时，记录的为拥有的value
+//}
+
 
 type inodes []inode

@@ -14,51 +14,78 @@ import (
 type txid uint64
 
 // Tx represents a read-only or read/write transaction on the database.
-// Read-only transactions can be used for retrieving values for keys and creating cursors.
+// Read-only  transactions can be used for retrieving values for keys and creating cursors.
 // Read/write transactions can create and remove buckets and create and remove keys.
 //
-// IMPORTANT: You must commit or rollback transactions when you are done with
-// them. Pages can not be reclaimed by the writer until no more transactions
-// are using them. A long running read transaction can cause the database to
-// quickly grow.
+// IMPORTANT: You must commit or rollback transactions when you are done with them.
+// Pages can not be reclaimed by the writer until no more transactions are using them.
+// A long running read transaction can cause the database to quickly grow.
 type Tx struct {
-	writable       bool
-	managed        bool
-	db             *DB
-	meta           *meta
-	root           Bucket
-	pages          map[pgid]*page
-	stats          TxStats
-	commitHandlers []func()
+	writable       bool				// 当前 tx 是否可写
+
+	// managed 表示当前 transaction 是否被 db 托管，即通过 db.Update() 或者 db.View() 来写或者读数据库;
+	// BoltDB 还支持直接调用 Tx 的相关方法进行读写，这时 managed 字段为false。
+	managed        bool				// 当前 tx 是否通过 db.Update() 或者 db.View() 进行数据库操作
+
+	db             *DB				// 当前 tx 归属的 db 对象
+	meta           *meta			// 当前 tx 归属的 db 的 meta 信息
+	root           Bucket			// 指根 bucket，所有 tx 都要从根开始查起
+	pages          map[pgid]*page 	// 当前 tx 操作（读或写）的 page ，也被称作 dirty pages
+	stats          TxStats			// 当前 tx 的操作统计
+	commitHandlers []func() 		// 保存 tx 在 commit 时执行的回调函数
+
 
 	// WriteFlag specifies the flag for write-related methods like WriteTo().
 	// Tx opens the database file with the specified flag to copy the data.
 	//
-	// By default, the flag is unset, which works well for mostly in-memory
-	// workloads. For databases that are much larger than available RAM,
+	// By default, the flag is unset, which works well for mostly in-memory workloads.
+	// For databases that are much larger than available RAM,
 	// set the flag to syscall.O_DIRECT to avoid trashing the page cache.
+
+	// WriteFlag 指定复制或移动数据库文件时，文件的打开模式，Tx 在打开数据库时会根据该 Flag 来复制数据。
+	// 默认情况 WriteFlag 是不设置的，对于内存操作则无所谓，但是当文件很大的时候，可以通过设置 syscall.O_DIRECT 避免 cache 抖动。
 	WriteFlag int
 }
 
+
+// 在 Tx 中的每个操作都会将变化后的 B-Tree 上的 node 缓存到 Tx 的 Bucket 副本中，这个变化只对该 Tx 可见。
+// 当有删除操作时，Tx 会将要释放的 page-id 暂存在 freelist 的 pending 池中，当 Tx 调用 Commit 时，
+// freelist 会将 pending 的 page-id 真正标记为 free 状态，如果 Tx 调用 Rollback 则会将 pending 池中的 page-id 移除，
+// 则使 Tx 的删除操作回滚。
+
+
 // init initializes the transaction.
 func (tx *Tx) init(db *DB) {
-	tx.db = db
-	tx.pages = nil
 
-	// Copy the meta page since it can be changed by the writer.
-	tx.meta = &meta{}
-	db.meta().copy(tx.meta)
+	// 1. 初始化
+	tx.db = db		// 将 tx.db 初始化为传入的 db
+	tx.pages = nil	// 将脏页字典 tx.pages 初始化为空
 
-	// Copy over the root bucket.
-	tx.root = newBucket(tx)
-	tx.root.bucket = &bucket{}
-	*tx.root.bucket = tx.meta.root
+	// 2. 复制 meta 页
+
+	// 每当一个 Tx 被创建时，会复制一份当前最新的 db.meta 到 tx.meta 中，这是因为 meta 可能被 Tx 修改（如 meta.txid 字段），
+	// 因此在提交前，Tx 只会操作自己复制的这份 tx.meta 。
+
+	tx.meta = &meta{}		 // 创建一个空的 meta 对象，用它初始化 tx.meta，用于存储 db.meta()
+	db.meta().copy(tx.meta)  // 将 db.meta() 返回的数据库 meta 信息复制到刚创建的 tx.meta 对象中，这里是对象拷贝而不是指针拷贝
+
+
+	// 3. 创建根 Bucket
+	tx.root = newBucket(tx)			// 用 newBucket(tx *Tx) 创建一个 Bucket ，并将其设为根 Bucket
+	tx.root.bucket = &bucket{}		// 创建匿名嵌套于 Bucket 中的 bucket ，用于备份存储 tx.meta.root
+	*tx.root.bucket = tx.meta.root	// 存储 tx.meta.root 的目的是为找到 root bucket 所在页，进而从页中读出 root bucket
+
+
 
 	// Increment the transaction id and add a page cache for writable transactions.
+	//
+	// 如果是可写的 transaction ，就将 meta 中的 txid 加 1 ；当可写 transaction commit 后，meta 就会更新到数据库文件中，
+	// 数据库的修改版本号就增加了。可见读事务不增加 txid ，仅读写事务增加。
 	if tx.writable {
-		tx.pages = make(map[pgid]*page)
-		tx.meta.txid += txid(1)
+		tx.pages = make(map[pgid]*page) // 初始化存储脏页的 map
+		tx.meta.txid += txid(1)			// 事务ID txid++
 	}
+
 }
 
 // ID returns the transaction id.
@@ -142,6 +169,7 @@ func (tx *Tx) OnCommit(fn func()) {
 // Returns an error if a disk write error occurs, or if Commit is
 // called on a read-only transaction.
 func (tx *Tx) Commit() error {
+
 	_assert(!tx.managed, "managed tx commit not allowed")
 	if tx.db == nil {
 		return ErrTxClosed
@@ -153,6 +181,8 @@ func (tx *Tx) Commit() error {
 
 	// Rebalance nodes which have had deletions.
 	var startTime = time.Now()
+
+	//
 	tx.root.rebalance()
 	if tx.stats.Rebalance > 0 {
 		tx.stats.RebalanceTime += time.Since(startTime)
@@ -455,15 +485,19 @@ func (tx *Tx) checkBucket(b *Bucket, reachable map[pgid]*page, freed map[pgid]bo
 
 // allocate returns a contiguous block of memory starting at a given page.
 func (tx *Tx) allocate(count int) (*page, error) {
+
+	// 分配连续的 count 个内存页，返回首页指针 p
 	p, err := tx.db.allocate(count)
 	if err != nil {
 		return nil, err
 	}
 
 	// Save to our page cache.
+	// 保存到内存缓冲中
 	tx.pages[p.id] = p
 
 	// Update statistics.
+	// 更新统计信息
 	tx.stats.PageCount++
 	tx.stats.PageAlloc += count * tx.db.pageSize
 
@@ -472,23 +506,34 @@ func (tx *Tx) allocate(count int) (*page, error) {
 
 // write writes any dirty pages to disk.
 func (tx *Tx) write() error {
-	// Sort pages by id.
+
+	// 1. 拷贝脏页字典 tx.pages 到 pages 中，以便进行排序
 	pages := make(pages, 0, len(tx.pages))
 	for _, p := range tx.pages {
 		pages = append(pages, p)
 	}
-	// Clear out page cache early.
+
+	// 2. 清空脏页列表
 	tx.pages = make(map[pgid]*page)
+
+	// 3. 对 pages 按 id 从小到大排序
 	sort.Sort(pages)
 
-	// Write pages to disk in order.
+	// 4. 按照 id 从小到大的顺序写入到文件中
 	for _, p := range pages {
-		size := (int(p.overflow) + 1) * tx.db.pageSize
+
+		// 当前页面的大小（每个页面大小是确定的，这里直接乘就可以）
+		size := (int(p.overflow) + 1) * tx.db.pageSize // p.overflow 表示当前 Page 是否有后续 Page，如果有，其表示后续页的数量，如果没有，则为0。
+
+		// 当前页面位于磁盘文件中的偏移量
 		offset := int64(p.id) * int64(tx.db.pageSize)
 
-		// Write out page in "max allocation" sized chunks.
-		ptr := (*[maxAllocSize]byte)(unsafe.Pointer(p))
+		// 将 p 转成字节数组，因为每次最多写入 maxAllocSize 字节，所以需要分次写入
+		ptr := (*[maxAllocSize]byte)(unsafe.Pointer(p)) 	// Write out page in "max allocation" sized chunks.
+
+		// 分次的将 p 写入到文件的 offset 偏移处，每次最多写入 maxAllocSize 字节
 		for {
+
 			// Limit our write to our max allocation size.
 			sz := size
 			if sz > maxAllocSize-1 {
@@ -514,106 +559,141 @@ func (tx *Tx) write() error {
 			offset += int64(sz)
 			ptr = (*[maxAllocSize]byte)(unsafe.Pointer(&ptr[sz]))
 		}
+
 	}
 
-	// Ignore file sync if flag is set on DB.
+	// 5. 检查是否需要落盘，如果需要就 fsync
 	if !tx.db.NoSync || IgnoreNoSync {
+		// 默认每次写都调用 sync 落盘
 		if err := fdatasync(tx.db); err != nil {
 			return err
 		}
 	}
 
-	// Put small pages back to page pool.
+	// 6. 把已写回的、独立的 page 放回到 pagePool 中
 	for _, p := range pages {
+
+		// 6.1 如果 p 是连续页面，则不予处理
+
 		// Ignore page sizes over 1 page.
 		// These are allocated using make() instead of the page pool.
 		if int(p.overflow) != 0 {
 			continue
 		}
 
+		// 6.2 如果 p 是单独页面，则清空页面（置0）
 		buf := (*[maxAllocSize]byte)(unsafe.Pointer(p))[:tx.db.pageSize]
-
 		// See https://go.googlesource.com/go/+/f03c9202c43e0abb130669852082117ca50aa9b1
 		for i := range buf {
 			buf[i] = 0
 		}
+
+		// 6.3 将清空后的页面放回到 pagePool 中，留待重用
 		tx.db.pagePool.Put(buf)
+
 	}
 
 	return nil
 }
 
 // writeMeta writes the meta to the disk.
+//
+// 步骤:
+//  1. 转存 tx.meta 到 p 中
+//  2. 把 p 写到磁盘中
+//  3. fsync
+//  4. 更新统计数据
 func (tx *Tx) writeMeta() error {
-	// Create a temporary buffer for the meta page.
-	buf := make([]byte, tx.db.pageSize)
-	p := tx.db.pageInBuffer(buf, 0)
-	tx.meta.write(p)
 
-	// Write the meta page to file.
+	// 1. Create a temporary buffer for the meta page.
+	buf := make([]byte, tx.db.pageSize)		// 创建 sizeOf(Page) 大小的 buf 用来存储 tx.meta
+	p := tx.db.pageInBuffer(buf, 0)		// 将 buf 转换为 Page 结构体指针 p
+	tx.meta.write(p) 						// 将 tx.meta 转存到 p 中
+
+	// 2. Write the meta page to file.
 	if _, err := tx.db.ops.writeAt(buf, int64(p.id)*int64(tx.db.pageSize)); err != nil {
 		return err
 	}
+
+	// 3. Fsync
 	if !tx.db.NoSync || IgnoreNoSync {
+		// 默认每次写都调用 sync 落盘
 		if err := fdatasync(tx.db); err != nil {
 			return err
 		}
 	}
 
-	// Update statistics.
+	// 4. Update statistics.
 	tx.stats.Write++
-
 	return nil
 }
 
 // page returns a reference to the page with a given id.
 // If page has been written to then a temporary buffered page is returned.
+//
+// 步骤:
+//  1. 检查 id 页是否位于脏页 tx.pages[] 列表中，如果是，则直接返回；
+//  2. 如果否，则直接从 mmap 中获取并返回。
 func (tx *Tx) page(id pgid) *page {
-	// Check the dirty pages first.
+	// 1. Check the dirty pages first.
 	if tx.pages != nil {
 		if p, ok := tx.pages[id]; ok {
 			return p
 		}
 	}
-
-	// Otherwise return directly from the mmap.
+	// 2. Otherwise return directly from the mmap.
 	return tx.db.page(id)
 }
 
 // forEachPage iterates over every page within a given page and executes a function.
+//
+//
+//
 func (tx *Tx) forEachPage(pgid pgid, depth int, fn func(*page, int)) {
+
+	// 获取 id 页
 	p := tx.page(pgid)
 
-	// Execute function.
+	// 执行 fn
 	fn(p, depth)
 
-	// Recursively loop over children.
+	// 如果是当前页面是 '分支节点' 则需要递归处理子页面
 	if (p.flags & branchPageFlag) != 0 {
+
+		// 如果当前页面有连续页面，则每个页面都要递归处理
 		for i := 0; i < int(p.count); i++ {
+
+			//
 			elem := p.branchPageElement(uint16(i))
+
+			// 递归处理
 			tx.forEachPage(elem.pgid, depth+1, fn)
 		}
+
 	}
 }
 
 // Page returns page information for a given page number.
 // This is only safe for concurrent use when used by a writable transaction.
 func (tx *Tx) Page(id int) (*PageInfo, error) {
+
 	if tx.db == nil {
 		return nil, ErrTxClosed
 	} else if pgid(id) >= tx.meta.pgid {
 		return nil, nil
 	}
 
-	// Build the page info.
+	// 1. 从 db 中取 id 页
 	p := tx.db.page(pgid(id))
+
+	// 2. 构造 PageInfo 结构体，填充字段
 	info := &PageInfo{
 		ID:            id,
 		Count:         int(p.count),
 		OverflowCount: int(p.overflow),
 	}
 
-	// Determine the type (or if it's free).
+	// 3. 确定页面类型，检查该页面是否已经被 free ，然后填充 info.Type 字段 		// Determine the type (or if it's free).
 	if tx.db.freelist.freed(pgid(id)) {
 		info.Type = "free"
 	} else {

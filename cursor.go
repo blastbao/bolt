@@ -15,6 +15,10 @@ import (
 // Changing data while traversing with a cursor may cause it to be invalidated
 // and return unexpected keys and/or values. You must reposition your cursor
 // after mutating data.
+
+
+// bucket: 要搜索的 Bucket 的引用
+// stack: 搜索堆栈，它实际是一个 slice ，其中的元素为 elemRef ，用于记录游标的搜索路径，最后一个元素指向游标当前位置
 type Cursor struct {
 	bucket *Bucket
 	stack  []elemRef
@@ -46,7 +50,6 @@ func (c *Cursor) First() (key []byte, value []byte) {
 		return k, nil
 	}
 	return k, v
-
 }
 
 // Last moves the cursor to the last item in the bucket and returns its key and value.
@@ -155,8 +158,13 @@ func (c *Cursor) seek(seek []byte) (key []byte, value []byte, flags uint32) {
 	_assert(c.bucket.tx.db != nil, "tx closed")
 
 	// Start from root page/node and traverse to correct page.
+
+	// 通过清空 stack ，将游标复位;
 	c.stack = c.stack[:0]
+	// 调用 search 方法从 Bucket 的根节点开始查找;
 	c.search(seek, c.bucket.root)
+
+
 	ref := &c.stack[len(c.stack)-1]
 
 	// If the cursor is pointing to the end of page/node then return nil.
@@ -377,6 +385,24 @@ func (c *Cursor) node() *node {
 }
 
 // elemRef represents a reference to an element on a given page/node.
+//
+// elemRef的各字段意义是:
+//	page:  elemRef 所代表的 page 的引用;
+//	node:  elemRef 所代表的 node 的引用;
+//	index: page 或 node 中元素的索引;
+
+
+// elemRef 实际上指向 B+Tree 上的一个节点，节点有可能已经实例化成 node ，也有可能是未实例化的 page 。
+// 我们前面提到过，Bucket 是内存中的动态对象，它缓存了 node 。
+//
+// Cursor 在遍历 B+Tree 时，
+// (1) 如果节点已经实例化成 node ，则 elemRef 中的 node 字段指向该 node ，page 字段为空；
+// (2) 如果节点是未实例化的 page ，则 elemRef 中的 page 字段指向该 page ，node 字段为空。
+//
+// elemRef 通过 page 或者 node 指向 B+Tree 的一个节点，通过 index 进一步指向节点中的 K/V 对。
+//
+// Cursor 在 B+Tree 上的移动过程就是将 elemRef 添加或者移除出 stack 的过程。
+
 type elemRef struct {
 	page  *page
 	node  *node
