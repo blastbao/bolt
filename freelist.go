@@ -11,23 +11,32 @@ import (
 
 // freelist represents a list of all pages that are available for allocation.
 // It also tracks pages that have been freed but are still in use by open transactions.
+
+
+// 字段说明:
+// 	1. ids 记录的是空闲可用的 page 的 pgid
+//	2. pending 记录的是每个写事务释放的 page 的 pgid
+//	3. cache 中记录的也是 ids 中的 pgid ，采用 map 为了方便查找
+
+
+// 维护了可以用于分配的 page id。
+
+
 type freelist struct {
-	// ids 指可用的页面的 Id
 	ids     []pgid          // all free and available free page ids.
-
-	// pending 指将要空闲的页面，由于数据库中的各种事务，一些操作后部分页面就可以被释放
 	pending map[txid][]pgid // mapping of soon-to-be free page ids by tx.
-
-	// cache 就是做了一个缓存，看一个页面是否可用
 	cache   map[pgid]bool   // fast lookup of all free and pending page ids.
 }
 
+
 // newFreelist returns an empty, initialized freelist.
 func newFreelist() *freelist {
+
 	return &freelist{
 		pending: make(map[txid][]pgid),
 		cache:   make(map[pgid]bool),
 	}
+
 }
 
 // size returns the size of the page after serialization.
@@ -72,13 +81,21 @@ func (f *freelist) copyall(dst []pgid) {
 
 // allocate returns the starting page id of a contiguous list of pages of a given size.
 // If a contiguous block cannot be found then 0 is returned.
+
+// 遍历 f.ids , 从中挑选出连续 n 个空闲的 page ，然后将其从 f.ids/f.cache 中剔除，然后返回起始的 page-id。
 func (f *freelist) allocate(n int) pgid {
+
+	// 如果没有可用 page 返回 0
 	if len(f.ids) == 0 {
 		return 0
 	}
 
 	var initial, previd pgid
+
+	// 遍历 ids , 从中挑选出连续 n 个空闲的 page ，然后将其从缓存中剔除，然后返回起始的 page-id
 	for i, id := range f.ids {
+
+		// 因为 DB 文件的起始 2 个 page 固定为 meta page ，因此有效的 page-id 不可能 <= 1 。
 		if id <= 1 {
 			panic(fmt.Sprintf("invalid page allocation: %d", id))
 		}
@@ -89,11 +106,12 @@ func (f *freelist) allocate(n int) pgid {
 		}
 
 		// If we found a contiguous block then remove it and return it.
+
 		if (id-initial)+1 == pgid(n) {
-			// If we're allocating off the beginning then take the fast path
-			// and just adjust the existing slice. This will use extra memory
-			// temporarily but the append() in free() will realloc the slice
-			// as is necessary.
+
+			// If we're allocating off the beginning then take the fast path and just adjust the existing slice.
+			// This will use extra memory temporarily but the append() in free() will realloc the slice as is necessary.
+
 			if (i + 1) == n {
 				f.ids = f.ids[i+1:]
 			} else {
@@ -111,6 +129,8 @@ func (f *freelist) allocate(n int) pgid {
 
 		previd = id
 	}
+
+	// 不存在满足需求的 page ，返回 0
 	return 0
 }
 

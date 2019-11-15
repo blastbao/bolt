@@ -30,7 +30,33 @@ const (
 // page id 类型
 type pgid uint64
 
-// boltdb 采用了分页(page)的方式访问文件，默认情况下一个页的大小为 4KB(4096 bytes) ，每当从文件中读取和写入都是以页作为最小的基本单位。
+// boltdb 采用了分页(page)的方式访问文件，默认情况下一个 page 的大小为 4KB(4096 bytes) ，每当从文件中读取和写入都是以 page 作为最小的基本单位。
+
+
+
+// page 是 boltdb 持久化时，与磁盘相关的数据结构。 page 的大小采用操作系统内存页的大小，即 getpagesize 系统调用的返回值。
+//
+// 字段说明:
+//
+// 1. id 为 page 的序号，
+// 1. flags 表示 page 的类型，有 branchPageFlag / leafPageFlag / metaPageFlag / freelistPageFlag 几种。
+// 1. count
+// 	当 page 是 freelistPageFlag 类型时，存储的是 freelist 中 pgid 数组中元素的个数;
+// 	当 page 是其他类型时，存储的是 inode 的个数。
+// 1. overflow 记录 page 中数据量超过一个 page 所能存储大小的时候需要额外的 page 的数目。
+//
+//
+// 每个 page 对应对应一个磁盘上的数据块。这个数据块的 layout 为:
+// | page struct data | page element items | k-v pairs |
+
+
+
+
+
+
+
+
+
 
 
 
@@ -52,6 +78,10 @@ type page struct {
 	// 1. Page Header 部分
 	id       pgid    // PageID，如 0,1,2。PageID 是用于从数据库文件的内存映射(mmap)中读取具体一页的索引值
 	flags    uint16  // 表示 Page 存储的类型，包含 branchPageFlag、leafPageFlag 等四种
+
+
+
+
 	count    uint16  // 表示 Page 存储的数据元素个数，包括 branchPage 和 leafPage 类型的页面中有用。对应的元素分别是 branchPageElement 和 leafPageElement 。
 	overflow uint32  // 表示当前 Page 是否有后续 Page；如果有，表示后续页的数量，如果没有，则为0。
 
@@ -60,12 +90,16 @@ type page struct {
 	ptr      uintptr // ptr 用于标记页头 Page Header 部分结尾处，或者页面内存储数据 Page Data 部分的起始处。
 
 
+
+
 	// page.ptr 保存页数据区域的起始地址，不同类型 page 保存的数据格式也不同，共有 4 种 page, 通过 flags 区分:
 	//
 	//	1. meta page: 		存放 db 的 meta data。
 	//	2. freelist page: 	存放 db 的空闲 page。
 	//	3. branch page: 	存放 branch node 的数据。
 	//	4. leaf page: 		存放 leaf node 的数据
+
+
 }
 
 // typ returns a human readable page type string used for debugging.
