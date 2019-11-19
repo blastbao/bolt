@@ -818,15 +818,19 @@ func (db *DB) beginRWTx() (*Tx, error) {
 	// Free any pages associated with closed read-only transactions.
 	var minid txid = 0xFFFFFFFFFFFFFFFF
 
-	// 遍历 db.txs 中记录的所有只读事务，取出其中最小的事务 id 即 minid，所有小于 minid 的缓存都已经失效，可以清理。
+	// 遍历 db.txs 中记录的所有只读事务，取出其中最小的读事务 id 即 minid
 	for _, t := range db.txs {
 		if t.meta.txid < minid {
 			minid = t.meta.txid
 		}
 	}
+
+	// 当前最小的读事务 id 为 minid ，意味着所有低于 minid 的读事务都已经结束，
+	// 因此可以释放掉 freelist 中那些为了防止读失效而缓存在 freelist.pending[] 中的 pages。
 	if minid > 0 {
 		db.freelist.release(minid - 1)
 	}
+
 
 	return t, nil
 }
