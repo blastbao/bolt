@@ -21,7 +21,7 @@ import (
 // 字段说明:
 // 	1. ids 记录的是空闲可用的 page 的 pgid
 //	2. pending 记录的是每个写事务释放的 page 的 pgid
-//	3. cache 中记录的也是 ids 中的 pgid ，采用 map 为了方便查找
+//	3. cache 中记录了 f.ids 和 f.pending 中所包含的所有 pgid ，具体可以查看 reindex() 和 freed() 函数来了解。
 
 type freelist struct {
 	ids     []pgid          // all free and available free page ids.
@@ -58,7 +58,6 @@ func (f *freelist) size() int {
 
 // count returns count of pages on the freelist
 func (f *freelist) count() int {
-
 	//
 	return f.free_count() + f.pending_count()
 }
@@ -171,7 +170,7 @@ func (f *freelist) free(txid txid, p *page) {
 		panic(fmt.Sprintf("cannot free page 0 or 1: %d", p.id))
 	}
 
-	// 数组 f.pending[txid] 中存储着写事务 txid 释放的 pages 的 pgid
+	// 数组 f.pending[txid] 中存储着写事务 txid 释放的 pages 的 pgids
 	var ids = f.pending[txid]
 
 	// Free page and all its overflow pages.

@@ -260,7 +260,7 @@ func Open(path string, mode os.FileMode, options *Options) (*DB, error) {
 	db.ops.writeAt = db.file.WriteAt
 
 	// Initialize the database if it doesn't exist.
-	// 1. 若数据文件 stat 信息无法获取，则报错
+	// 1. 若数据文件 stat 信息无法获取（可能文件不存在），则报错
 	if info, err := db.file.Stat(); err != nil {
 		return nil, err
 
@@ -465,8 +465,6 @@ func (db *DB) munmap() error {
 //
 // 1<<3 ，相当于 1 * 2^3
 //
-//
-
 // mmapSize determines the appropriate size for the mmap given the current size
 // of the database. The minimum size is 32KB and doubles until it reaches 1GB.
 // Returns an error if the new mmap size is greater than the max allowed.
