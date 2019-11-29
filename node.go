@@ -607,23 +607,18 @@ func (n *node) dump() {
 */
 
 type nodes []*node
-
 func (s nodes) Len() int           { return len(s) }
 func (s nodes) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s nodes) Less(i, j int) bool { return bytes.Compare(s[i].inodes[0].key, s[j].inodes[0].key) == -1 }
 
-
 // inode represents an internal node inside of a node.
 // It can be used to point to elements in a page or point to an element which hasn't been added to a page yet.
-
 type inode struct {
 	flags uint32	// 指明该 K/V 对是否代表一个 Bucket，如果是 Bucket ，则其值为 1 ，否则为 0 ;
 	pgid  pgid		// 根节点或内节点的子节点的 pgid ，可以理解为 Pointer ，请注意，叶子节点中该值无意义;
 	key   []byte	// key
 	value []byte	// value
 }
-
-
 
 //
 //type inode struct {

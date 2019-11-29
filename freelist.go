@@ -8,10 +8,10 @@ import (
 
 // 当发起一个读事务时，Tx 单独复制一份 meta 信息，从这份独有的 meta 作为入口，可以读出该 meta 指向的数据，
 // 此时即使有一个写事务修改了相关 key 的数据，新修改的数据只会被写入新的 page ，读事务持有的 page 会进入 pending 池，
-// 因此该读事务相关的数据并不会被修改。只有该 page 相关的读事务都结束时，才会从 pending 池进入到 cache 池中，从而被复用修改。
+// 因此该读事务相关的数据并不会被修改。只有该 page 相关的读事务都结束时，才会从 pending 池进入到空闲池 ids 中，从而被复用。
 
 // 当写事务更新数据时，并不直接覆盖老数据，而且分配一个新的 page 将更新后的数据写入，
-// 然后将老数据占用的 page 放入 pending 池，建立新的索引。
+// 然后将老数据占用的 page 放入 pending 池，更新索引结构。
 // 当事务需要回滚时，只需要将 pending 池中的 page 释放，将索引回滚即完成数据的回滚。
 // 这样加速了事务的回滚，减少了事务缓存的内存使用，同时避免了对正在读的事务的干扰。
 
@@ -20,15 +20,13 @@ import (
 
 // 字段说明:
 // 	1. ids 记录的是空闲可用的 page 的 pgid
-//	2. pending 记录的是每个写事务释放的 page 的 pgid
-//	3. cache 中记录了 f.ids 和 f.pending 中所包含的所有 pgid ，具体可以查看 reindex() 和 freed() 函数来了解。
-
+//	2. pending 记录的是每个写事务释放的 page 的 pgid，这些 page 会在后面合适的时机被回收，放到 ids 中。
+//	3. cache 中记录了 f.ids 和 f.pending 中所包含的所有 pgid ，已被分配的 pgid 不会出现在 cache 中。 cache 能够快速判断某 page 是否是空闲的，具体可以查看 reindex() 和 freed() 函数来了解。
 type freelist struct {
 	ids     []pgid          // all free and available free page ids.
 	pending map[txid][]pgid // mapping of soon-to-be free page ids by tx.
 	cache   map[pgid]bool   // fast lookup of all free and pending page ids.
 }
-
 
 // newFreelist returns an empty, initialized freelist.
 func newFreelist() *freelist {
@@ -70,9 +68,6 @@ func (f *freelist) free_count() int {
 	return len(f.ids)
 }
 
-
-
-
 // pending_count returns count of pending pages
 func (f *freelist) pending_count() int {
 	// freelist 中被写事务释放，但是可能被读事务占用的 page 总数，这部分 pages 可以被回收再利用
@@ -82,10 +77,6 @@ func (f *freelist) pending_count() int {
 	}
 	return count
 }
-
-
-
-
 
 // copyall copies into dst a list of all free ids and all pending ids in one sorted list.
 // f.count returns the minimum length required for dst.
@@ -115,7 +106,7 @@ func (f *freelist) allocate(n int) pgid {
 
 	var initial, previd pgid
 
-	// 遍历 ids , 从中挑选出连续 n 个空闲的 page ，然后将其从缓存中剔除，然后返回起始的 page-id
+	// 遍历 ids , 从中挑选出连续 n 个空闲的 page ，然后将其从 ids 、 cache 缓存中剔除，然后返回起始的 page-id
 	for i, id := range f.ids {
 
 		// 因为 DB 文件的起始 2 个 page 固定为 meta page ，因此有效的 page-id 不可能 <= 1 。
@@ -218,27 +209,20 @@ func (f *freelist) release(txid txid) {
 	f.ids = pgids(f.ids).merge(m)
 }
 
-
-
-
-
 // rollback removes the pages from a given pending tx.
+//
+//
+// 回滚操作就是：把写事务所淘汰的页面恢复回来（从 pending 中移除），避免其被回收。
+
 func (f *freelist) rollback(txid txid) {
-
-
 
 	// Remove page ids from cache.
 	for _, id := range f.pending[txid] {
 		delete(f.cache, id)
 	}
 
-
-
 	// Remove pages from pending list.
 	delete(f.pending, txid)
-
-
-
 }
 
 // freed returns whether a given page is in the free list.
@@ -353,11 +337,13 @@ func (f *freelist) reload(p *page) {
 // reindex rebuilds the free cache based on available and pending free lists.
 func (f *freelist) reindex() {
 
+	//
 	f.cache = make(map[pgid]bool, len(f.ids))
 	for _, id := range f.ids {
 		f.cache[id] = true
 	}
 
+	//
 	for _, pendingIDs := range f.pending {
 		for _, pendingID := range pendingIDs {
 			f.cache[pendingID] = true

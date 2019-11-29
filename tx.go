@@ -686,10 +686,11 @@ func (tx *Tx) Page(id int) (*PageInfo, error) {
 		return nil, nil
 	}
 
-	// 1. 从 db 中取第 id 页
+	// 1. 从 db 中取第 id 页对应的 * page 结构体指针
 	p := tx.db.page(pgid(id))
 
-	// 2. 构造 PageInfo 结构体，填充字段
+
+	// 2. 构造 PageInfo 结构体，用来保存页面 p 的部分信息
 	info := &PageInfo{
 		ID:            id,
 		Count:         int(p.count),
@@ -700,7 +701,7 @@ func (tx *Tx) Page(id int) (*PageInfo, error) {
 	if tx.db.freelist.freed(pgid(id)) {
 		info.Type = "free"
 	} else {
-		info.Type = p.typ()
+		info.Type = p.typ() // p.typ() 会根据 p.flags 确定页面 p 的类型
 	}
 
 	return info, nil
